@@ -44,40 +44,62 @@ window.workspace = {
   },
   triggerEvent: function(event) {
     if (this.listeners[event]) {
+      var mockEventData = {};
+      if (event === sync.api.Workspace.EventType.EDITOR_LOADED) {
+        // Ensure window.editor and its methods are set up before creating mockEventData
+        if (!window.editor) {
+          window.editor = {}; // Should already be defined by the more complete mock below
+        }
+        if (!window.editor.getEditingSupport) {
+            // Temporary setup if editor is not fully mocked yet by the time triggerEvent is called by a test prematurely
+            // This is less likely given the beforeEach structure but good for robustness.
+            window.editor.getEditingSupport = function() { return {}; };
+        }
+        mockEventData = { editor: window.editor }; // Pass the global mock editor
+      }
       this.listeners[event].forEach(function(callback) {
-        callback();
+        callback(mockEventData); // Pass the event data object
       });
     }
   }
 };
 
 // Mock 'editor' object and its methods
+// This needs to be defined before workspace.triggerEvent might use it.
 window.editor = {
+  _editingSupport: null, // Internal store for the editingSupport object
   getEditingSupport: function() {
-    return {
-      getType: function() {
-        return sync.api.Editor.EditorTypes.AUTHOR;
-      },
-      getSelectionManager: function() {
-        return {
-          getSelection: function() {
-            return {
-              getNodeAtSelection: function() {
-                // Return a dummy XML node
-                let parser = new DOMParser();
-                let xmlDoc = parser.parseFromString('<dummyNode/>', 'text/xml');
-                return xmlDoc.documentElement;
-              }
-            };
-          }
-        };
-      },
-      getDocument: function() {
-        // Return a dummy XML document
-        let parser = new DOMParser();
-        return parser.parseFromString('<root><child/></root>', 'text/xml');
-      }
-    };
+    if (!this._editingSupport) {
+      // Initial mock for editingSupport; the plugin will add functions to this object.
+      this._editingSupport = {
+        getType: function() {
+          return sync.api.Editor.EditorTypes.AUTHOR;
+        },
+        getSelectionManager: function() {
+          return {
+            getSelection: function() {
+              return {
+                getNodeAtSelection: function() {
+                  let parser = new DOMParser();
+                  let xmlDoc = parser.parseFromString('<dummyNode/>', 'text/xml');
+                  return xmlDoc.documentElement;
+                }
+              };
+            }
+          };
+        },
+        getDocument: function() {
+          let parser = new DOMParser();
+          return parser.parseFromString('<root><child/></root>', 'text/xml');
+        }
+        // evaluateXPathAtSelection and evaluateXPath will be added by the plugin
+      };
+    }
+    return this._editingSupport;
+  },
+  // Helper to reset the internal editingSupport for tests if needed (e.g. if plugin modifies it in a way that breaks other tests)
+  resetEditingSupport: function() {
+    this._editingSupport = null; 
   }
 };
 
@@ -111,47 +133,83 @@ if (typeof wgxpath !== 'undefined' && wgxpath.install) {
 
 // QUnit tests
 QUnit.module('Z Plugin Tests', function(hooks) {
-  let editingSupport;
+  let editingSupport; // This will hold the reference to window.editor.getEditingSupport()
 
-  hooks.beforeEach(function() {
-    // Reset or re-initialize mocks for each test if necessary
-    // Trigger the editor loaded event to initialize the plugin and populate editingSupport
+  hooks.beforeEach(function(assert) {
+    // 1. Ensure window.editor and getEditingSupport are set up.
+    // window.editor is globally defined. We can reset its internal _editingSupport if needed.
+    window.editor.resetEditingSupport(); // Clears any functions added by the plugin in previous tests
+
+    // 2. Trigger the event. The plugin's listener will execute and modify window.editor._editingSupport.
     workspace.triggerEvent(sync.api.Workspace.EventType.EDITOR_LOADED);
+    
+    // 3. Obtain the editingSupport instance *after* the plugin has initialized.
     editingSupport = window.editor.getEditingSupport();
 
-    // Default mock for getNodeAtSelection, can be overridden in tests
-    editingSupport.getSelectionManager().getSelection().getNodeAtSelection = function() {
-      let parser = new DOMParser();
-      let xmlDoc = parser.parseFromString('<defaultRoot><selectedNode/></defaultRoot>', 'text/xml');
-      return xmlDoc.getElementsByTagName('selectedNode')[0]; // Return the <selectedNode>
-    };
-
-    // Default mock for getDocument, can be overridden if tests need a different main document
-     editingSupport.getDocument = function() {
-        let parser = new DOMParser();
-        return parser.parseFromString('<mainDocument><globalElement/></mainDocument>', 'text/xml');
-    };
+    // Default mock for getNodeAtSelection for this module, can be overridden in specific tests
+    // This needs to be set on the 'editingSupport' instance obtained *after* plugin initialization
+    if (editingSupport && editingSupport.getSelectionManager) { // Check if editingSupport is valid
+        editingSupport.getSelectionManager().getSelection().getNodeAtSelection = function() {
+            let parser = new DOMParser();
+            let xmlDoc = parser.parseFromString('<defaultRoot><selectedNode/></defaultRoot>', 'text/xml');
+            return xmlDoc.getElementsByTagName('selectedNode')[0];
+        };
+        editingSupport.getDocument = function() { // Default for this module
+            let parser = new DOMParser();
+            return parser.parseFromString('<mainDocument><globalElement/></mainDocument>', 'text/xml');
+        };
+    } else {
+        // This case should ideally not be reached if plugin initializes correctly.
+        // If it is, tests depending on editingSupport will likely fail, which is what assert.ok below will catch.
+        console.error("Editing support not available after plugin initialization in Z Plugin Tests module.");
+        // QUnit's assert object is passed to beforeEach, so we can use it here if needed for early failure.
+        if (assert && assert.ok) { // Check if assert is available (it is in QUnit 2.x)
+            assert.ok(false, "Critical: editingSupport was not properly initialized in Z Plugin Tests beforeEach.");
+        }
+    }
   });
 
   QUnit.test('Plugin initialization - evaluateXPathAtSelection and evaluateXPath exist', function(assert) {
+    // editingSupport is now the one potentially modified by the plugin
+    assert.ok(editingSupport, "editingSupport object itself should exist");
     assert.ok(typeof editingSupport.evaluateXPathAtSelection === 'function', 'evaluateXPathAtSelection function should be defined on editingSupport');
     assert.ok(typeof editingSupport.evaluateXPath === 'function', 'evaluateXPath function should be defined on editingSupport');
+    
     // Also check window-level functions for backward compatibility if they are still there
-    assert.ok(typeof window.evaluateXPathAtSelection === 'function', 'window.evaluateXPathAtSelection function should be defined');
+    // (assuming z-plugin.js might still add them to window for some reason)
+    assert.ok(typeof window.evaluateXPathAtSelection === 'function', 'window.evaluateXPathAtSelection should also be defined on window');
     assert.ok(typeof window.evaluateXPath === 'function', 'window.evaluateXPath function should be defined');
   });
 
   // Tests for evaluateXPath (global context)
   QUnit.module('evaluateXPath Tests', function(hooks) {
     let parser;
-    hooks.beforeEach(function() {
+    let parser; // Declare parser here to be accessible in all tests in this module
+
+    hooks.beforeEach(function(assert) {
+      // 1. Ensure window.editor and getEditingSupport are set up.
+      window.editor.resetEditingSupport();
+
+      // 2. Trigger the event.
       workspace.triggerEvent(sync.api.Workspace.EventType.EDITOR_LOADED);
+      
+      // 3. Obtain the editingSupport instance *after* the plugin has initialized.
       editingSupport = window.editor.getEditingSupport();
-      parser = new DOMParser();
-      // Default document for tests, can be overridden
-      editingSupport.getDocument = function() {
-        return parser.parseFromString('<docRoot><item id="A">Item A</item><item id="B">Item B</item><item id="C" class="target">Item C</item></docRoot>', "text/xml");
-      };
+      
+      parser = new DOMParser(); // Initialize parser for each test
+
+      if (editingSupport && editingSupport.getDocument) {
+          // Default document for tests in this module, can be overridden in specific tests
+          editingSupport.getDocument = function() {
+            return parser.parseFromString('<docRoot><item id="A">Item A</item><item id="B">Item B</item><item id="C" class="target">Item C</item></docRoot>', "text/xml");
+          };
+      } else {
+          if (assert && assert.ok) {
+            assert.ok(false, "Critical: editingSupport was not properly initialized in evaluateXPath Tests beforeEach.");
+          } else {
+            console.error("Editing support not available after plugin initialization in evaluateXPath Tests module.");
+          }
+      }
     });
 
     // --- Basic Queries ---
@@ -454,10 +512,28 @@ QUnit.module('Z Plugin Tests', function(hooks) {
 
   // Tests for evaluateXPathAtSelection (selection context)
   QUnit.module('evaluateXPathAtSelection Tests', function(hooks) {
-    hooks.beforeEach(function() {
-      // Ensure plugin is loaded and editingSupport is available
+    hooks.beforeEach(function(assert) {
+      // 1. Ensure window.editor and getEditingSupport are set up.
+      window.editor.resetEditingSupport();
+
+      // 2. Trigger the event.
       workspace.triggerEvent(sync.api.Workspace.EventType.EDITOR_LOADED);
+      
+      // 3. Obtain the editingSupport instance *after* the plugin has initialized.
       editingSupport = window.editor.getEditingSupport();
+
+      if (!editingSupport || !editingSupport.getSelectionManager) {
+          if (assert && assert.ok) {
+            assert.ok(false, "Critical: editingSupport was not properly initialized in evaluateXPathAtSelection Tests beforeEach.");
+          } else {
+            console.error("Editing support not available after plugin initialization in evaluateXPathAtSelection Tests module.");
+          }
+      }
+      // Default mocks for selection can be set here if needed, or within individual tests
+      // For example:
+      // if (editingSupport && editingSupport.getSelectionManager) {
+      //   editingSupport.getSelectionManager().getSelection().getNodeAtSelection = function() { ... default mock ... };
+      // }
     });
 
     // --- Basic Selections ---
