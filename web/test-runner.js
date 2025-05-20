@@ -183,7 +183,6 @@ QUnit.module('Z Plugin Tests', function(hooks) {
 
   // Tests for evaluateXPath (global context)
   QUnit.module('evaluateXPath Tests', function(hooks) {
-    let parser;
     let parser; // Declare parser here to be accessible in all tests in this module
 
     hooks.beforeEach(function(assert) {
